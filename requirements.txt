@@ -1,0 +1,5 @@
+neo4j
+py-radix
+pandas
+plotly
+IPython
