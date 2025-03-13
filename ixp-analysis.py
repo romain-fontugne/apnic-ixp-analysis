@@ -22,25 +22,34 @@
 # %%
 COUNTRY_CODES = ["NZ", "AU", "JP", "KR", "CN", "TH", "GU", "IN", "PK", "PH", "ID", "SG", "MY", "MM", "BD"]
 
-# imports for output
+# ASes representing more than EYEBALL_MIN_PERC percent of the population are
+# considered as eyeball networks
+EYEBALL_MIN_PERC = 1
+
+# ASes with a country hegemony value higher than HEGE_MIN are considered as
+# transit networks
+HEGE_MIN = 0.01
+
+import os
 from collections import defaultdict
-from IPython.display import display, Markdown, HTML
+from IPython.display import display, HTML
 # 
-import plotly.graph_objects as go
 from plotly.offline import init_notebook_mode, iplot
 from plotly.graph_objs import *
 import plotly.express as px
-from itertools import cycle
 import pandas as pd
-import numpy as np
-
-import radix
-import socket
+from sklearn.cluster import AgglomerativeClustering, DBSCAN
 
 #init_notebook_mode(connected=True) 
 
 # Setup access to IYP
 from neo4j import GraphDatabase
+
+# Prepare output folders
+os.makedirs('output', exist_ok=True)
+os.makedirs('output/ixp_distribution', exist_ok=True)
+os.makedirs('output/as_peering_count', exist_ok=True)
+os.makedirs('output/ixp_stats', exist_ok=True)
 
 # Using IYP local instance
 URI = "neo4j://localhost:7687"
@@ -61,7 +70,8 @@ def group_by_nb_ix(query):
     as_nb_ix_list = []
 
     for country_code in COUNTRY_CODES:
-        res, _, keys = db.execute_query(query, country_code=country_code)
+        res, _, keys = db.execute_query(query, country_code=country_code, 
+                                        eyeball_min_perc=EYEBALL_MIN_PERC, hege_min=HEGE_MIN)
         df = pd.DataFrame(res, columns=keys)
 
         # Keep data for later analysis
@@ -84,7 +94,8 @@ def as_no_ixp(query) -> pd.DataFrame:
     as_nb_ix_list = []
 
     for country_code in COUNTRY_CODES:
-        res, _, keys = db.execute_query(query, country_code=country_code)
+        res, _, keys = db.execute_query(query, country_code=country_code,
+                                        eyeball_min_perc=EYEBALL_MIN_PERC, hege_min=HEGE_MIN)
         df = pd.DataFrame(res, columns=keys)
         df = df[df['nb_ix'] == 0]
 
@@ -114,12 +125,12 @@ fig = px.bar(df, x='country', y="asn", color='nb_ix',
              color_continuous_scale=[(0.00, "red"),   (0.01, "red"), (0.01, "green"),
                                      (0.66, "green"), (0.66, "blue"),  (1.00, "blue")],
              title='Distribution of all ASes at IXPs', text='nb_ix')
-fig.show()
+fig.write_html('output/as_peering_count/all.html')
 
 query_top = """
 MATCH (ases:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
 MATCH (ases)-[ihr_rank:RANK {reference_org:'IHR', weightscheme:'as'}]-(:Ranking)
-WHERE (ases)-[:ORIGINATE]-(:Prefix) AND ihr_rank.hege > 0.01
+WHERE (ases)-[:ORIGINATE]-(:Prefix) AND ihr_rank.hege > $hege_min
 OPTIONAL MATCH (ases)-[:MEMBER_OF]-(ix:IXP)
 OPTIONAL MATCH (ases)-[:RANK {reference_name:'caida.asrank'}]-(ix:IXP)
 OPTIONAL MATCH (ix)-[:COUNTRY]-(cc:Country)
@@ -132,12 +143,12 @@ fig = px.bar(df, x='country', y="asn", color='nb_ix',
              color_continuous_scale=[(0.00, "red"),   (0.01, "red"), (0.01, "green"),
                                      (0.66, "green"), (0.66, "blue"),  (1.00, "blue")],
              title='Distribution of transit networks at IXPs (transit for more that 1% ASes)', text='nb_ix')
-fig.show()
+fig.write_html('output/as_peering_count/transit.html')
 
 query_pop = """
 MATCH (ases:AS)-[:COUNTRY {reference_org:'NRO'}]-(selected_country:Country {country_code:$country_code})
 MATCH (ases)-[p:POPULATION]-(selected_country)
-WHERE (ases)-[:ORIGINATE]-(:Prefix) AND p.percent > 1
+WHERE (ases)-[:ORIGINATE]-(:Prefix) AND p.percent > $eyeball_min_perc
 OPTIONAL MATCH (ases)-[:MEMBER_OF]-(ix:IXP)
 OPTIONAL MATCH (ases)-[:RANK {reference_name:'caida.asrank'}]-(ix:IXP)
 OPTIONAL MATCH (ix)-[:COUNTRY]-(cc:Country)
@@ -150,7 +161,7 @@ fig = px.bar(df, x='country', y="asn", color='nb_ix',
              color_continuous_scale=[(0.00, "red"),   (0.01, "red"), (0.01, "green"),
                                      (0.66, "green"), (0.66, "blue"),  (1.00, "blue")],
              title='Distribution of eyeball networks at IXPs (host more than 1% population)', text='nb_ix')
-fig.show()
+fig.write_html('output/as_peering_count/eyeball.html')
 
 # %% [markdown]
 # ## Eyeball networks not at IXPs
@@ -170,39 +181,161 @@ display(HTML(as_no_ixp(query_pop).to_html()))
 # single IXP versus those that peer at multiple locations.
 
 # %%
-query_ix_mem = """
-MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(mem_country:Country {country_code:$country_code})
-MATCH (ix)-[:MEMBER_OF]-(members)
+MIN_NB_AS = 0.05
+NORMALIZE = False
+
+
+def heatmap_ixps(query, fname_suffix):
+    for country_code in COUNTRY_CODES:
+        ixs = defaultdict(set)
+        countries = defaultdict(set)
+        asns = set()
+        membership_per_dataset = defaultdict(set)
+        res, _, _ = db.execute_query(query, country_code=country_code,
+                                     hege_min=HEGE_MIN, eyeball_min_perc=EYEBALL_MIN_PERC)
+        for ix_name, member_asn, ix_country, data_source in res:
+            ixs[ix_name.lower()].add(member_asn)
+            asns.add(member_asn)
+            countries[ix_country].add(member_asn)
+
+            # Keep track of data sources
+            membership_per_dataset[data_source].add(f'{ix_name}, {member_asn}')
+
+        # remove unpopular international IXPs
+        to_remove = []
+        threshold = int(len(asns)*MIN_NB_AS)
+        for ix, members in ixs.items():
+            if len(members) < threshold and not ix.endswith(country_code):
+                to_remove.append(ix)
+
+        for ix in to_remove:
+            ixs.pop(ix)
+
+        # Build the matrix
+        nb_members_matrix = []
+        for members0 in ixs.values():
+            row = []
+            for members1 in ixs.values():
+                row.append(len(members0.intersection(members1)))
+                if NORMALIZE:
+                    row[-1] /= len(members0)
+
+            nb_members_matrix.append(row)
+
+        # Sort the matrix
+        from scipy.cluster.hierarchy import linkage, fcluster
+
+        # Clusterize the data
+        threshold = 0.2
+        Z = linkage(nb_members_matrix, 'ward')
+        clusters = list(fcluster(Z, threshold, criterion='distance'))
+
+        # clusterer = AgglomerativeClustering(n_clusters=len(nb_members_matrix), metric="precomputed", linkage="average")
+        # clusters = list(clusterer.fit_predict(nb_members_matrix))
+        print(clusters)
+
+        labels = list(ixs.keys())
+        sorted_labels = []
+        sorted_matrix = []
+        for i in range(max(clusters)):
+            idx = clusters.index(i+1)
+            sorted_labels.append(labels[idx])
+
+            row = nb_members_matrix[idx]
+            sorted_row = [row[clusters.index(j+1)] for j in range(max(clusters))]
+            sorted_matrix.append(sorted_row)
+
+        if len(sorted_matrix):
+            title = f'{country_code}:  {len(asns)} {country_code} ASNs peer at IXPs (intl. IXP with less than {threshold} ASes not shown)'
+
+            for data_source, mem in membership_per_dataset.items():
+                title += f'<br>   {len(mem)} membership reported by {data_source}'
+            title += '<br>   Top countries where these ASNs peer (nb. unique ASNs):'
+            top_countries = sorted(countries.items(), key=lambda x: len(x[1]), reverse=True)
+            for cc, asns in top_countries[:5]:
+                title += f'<br>        {len(asns)} peers in {cc}'
+
+            fig = px.imshow(sorted_matrix, x=sorted_labels, y=sorted_labels,
+                            color_continuous_scale='sunsetdark', title=title, text_auto=True)
+            fig.write_html(f'output/ixp_distribution/{country_code}_{fname_suffix}.html')
+        else:
+            print(f'WARNING: no data for {country_code}')
+
+
+query_ix_mem_all = """
+MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+MATCH (ix)-[mo:MEMBER_OF]-(members)
 OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
-RETURN ix_country.country_code + ' - ' + ix.name AS ix_name, members.asn AS member_asn, mem_country.country_code AS member_country ORDER BY ix_name
+OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+members.asn AS member_asn, ix_country.country_code AS ix_country,
+mo.reference_org AS data_source
+ORDER BY ix_name, ix_org.name
 """
 
-MIN_NB_AS = 10
+heatmap_ixps(query_ix_mem_all, 'all')
+
+if False:
+    query_ix_mem_transit = """
+    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    MATCH (members)-[ihr_rank:RANK {reference_org:'IHR', weightscheme:'as'}]-(:Ranking)
+    WHERE ihr_rank.hege > $hege_min
+    MATCH (ix)-[mo:MEMBER_OF]-(members)
+    OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
+    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+    members.asn AS member_asn, ix_country.country_code AS ix_country,
+    mo.reference_org AS data_source
+    ORDER BY ix_name, ix_org.name
+    """
+
+    heatmap_ixps(query_ix_mem_transit, 'transit')
+
+    query_ix_mem_eyeball = """
+    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    MATCH (members)-[p:POPULATION]-(selected_country)
+    WHERE  p.percent > $eyeball_min_perc
+    MATCH (ix)-[mo:MEMBER_OF]-(members)
+    OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
+    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+    members.asn AS member_asn, ix_country.country_code AS ix_country,
+    mo.reference_org AS data_source
+    ORDER BY ix_name, ix_org.name
+    """
+
+    heatmap_ixps(query_ix_mem_eyeball, 'eyeball')
+
+    query_ix_mem_content = """
+    MATCH (a:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    MATCH (ix)-[mo:MEMBER_OF]-(a)
+    WITH ix
+    MATCH (ix)-[mo:MEMBER_OF]-(members:AS)-[:CATEGORIZED]-(:Tag {label:'Content'})
+    OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
+    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+    members.asn AS member_asn, ix_country.country_code AS ix_country,
+    mo.reference_org AS data_source
+    ORDER BY ix_name, ix_org.name
+    """
+
+    heatmap_ixps(query_ix_mem_content, 'content')
+
+##
+
+query_ix_stats = """
+MATCH (ix:IXP)-[:COUNTRY]-(cc:Country {country_code:$country_code})
+OPTIONAL MATCH (ix)-[:MEMBER_OF]-(content_as:AS)-[:CATEGORIZED]-(:Tag {label:'Content'})
+OPTIONAL MATCH (ix)-[:MEMBER_OF]-(eyeball_as:AS)-[:CATEGORIZED]-(:Tag {label:'Eyeball'})
+OPTIONAL MATCH (ix)-[:MEMBER_OF]-(a:AS)
+RETURN ix.name AS ix_name, count(DISTINCT a.asn) AS nb_members, count(DISTINCT content_as) AS nb_content,
+count(DISTINCT eyeball_as) AS nb_eyeball, collect(DISTINCT content_as.asn) AS content_ases,
+collect(DISTINCT eyeball_as.asn) AS eyeball_ases, cc.country_code as country_code
+"""
 
 for country_code in COUNTRY_CODES:
-    ixs = defaultdict(set)
-    res, _, keys = db.execute_query(query_ix_mem, country_code=country_code)
-    for ix_name, member_asn, member_country in res:
-        ixs[ix_name.lower()].add(member_asn)
+    res, _, keys = db.execute_query(query_ix_stats, country_code=country_code)
+    df = pd.DataFrame(res, columns=keys)
 
-    # remove unpopular international IXPs
-    to_remove = []
-    for ix, members in ixs.items():
-        if len(members) < MIN_NB_AS and not ix.startswith(country_code):
-            to_remove.append(ix)
-
-    for ix in to_remove:
-        ixs.pop(ix)
-
-    # Plot in a matrix
-    nb_members_matrix = []
-    for members0 in ixs.values():
-        row = []
-        for members1 in ixs.values():
-            row.append(len(members0.intersection(members1)) / len(members0))
-
-        nb_members_matrix.append(row)
-
-    fig = px.imshow(nb_members_matrix, x=list(ixs.keys()), y=list(ixs.keys()),
-                    color_continuous_scale='autumn', title=country_code)
-    fig.show()
+    fig = px.scatter(df, x='nb_content', y='nb_eyeball', size='nb_members', hover_name='ix_name')
+    fig.write_html(f'output/ixp_stats/{country_code}.html')
