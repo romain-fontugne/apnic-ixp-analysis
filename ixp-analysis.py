@@ -20,7 +20,12 @@
 # into the level of engagement and redundancy in the local peering environment.
 
 # %%
-COUNTRY_CODES = ["NZ", "AU", "JP", "KR", "CN", "TH", "GU", "IN", "PK", "PH", "ID", "SG", "MY", "MM", "BD"]
+COUNTRY_CODES = ["AF", "AS", "AU", "BD", "BT", "IO", "BN", "KH", "CN", "CX",
+                 "CC", "CK", "TL", "FJ", "PF", "TF", "GU", "HK", "IN", "ID",
+                 "JP", "KI", "KP", "KR", "LA", "MO", "MY", "MV", "MH", "FM",
+                 "MN", "MM", "NR", "NP", "NC", "NZ", "NU", "NF", " MP", "PK",
+                 "PW", "PG", "PH", "PN", "WS", "SG", "SB", "LK", "TW", "TH",
+                 "TK", "TO", "TV", "VU", "VN", "WF"]
 
 # ASes representing more than EYEBALL_MIN_PERC percent of the population are
 # considered as eyeball networks
@@ -33,12 +38,11 @@ HEGE_MIN = 0.01
 import os
 from collections import defaultdict
 from IPython.display import display, HTML
-# 
-from plotly.offline import init_notebook_mode, iplot
 from plotly.graph_objs import *
 import plotly.express as px
 import pandas as pd
-from sklearn.cluster import AgglomerativeClustering, DBSCAN
+from scipy.cluster.hierarchy import linkage, fcluster
+
 
 #init_notebook_mode(connected=True) 
 
@@ -203,10 +207,13 @@ def heatmap_ixps(query, fname_suffix):
 
         # remove unpopular international IXPs
         to_remove = []
-        threshold = int(len(asns)*MIN_NB_AS)
+        threshold_ixp = max(int(len(asns)*MIN_NB_AS), 5)
         for ix, members in ixs.items():
-            if len(members) < threshold and not ix.endswith(country_code):
+            if len(members) < threshold_ixp and not ix.endswith(country_code.lower()):
                 to_remove.append(ix)
+            elif ix.endswith(country_code.lower()) and len(members) < 5:
+                to_remove.append(ix)
+
 
         for ix in to_remove:
             ixs.pop(ix)
@@ -222,31 +229,28 @@ def heatmap_ixps(query, fname_suffix):
 
             nb_members_matrix.append(row)
 
-        # Sort the matrix
-        from scipy.cluster.hierarchy import linkage, fcluster
+        if len(nb_members_matrix) > 2:
+            # Sort the matrix / Cluster the data
+            threshold_cluster = 0.2
+            Z = linkage(nb_members_matrix, 'ward')
+            clusters = list(fcluster(Z, threshold_cluster, criterion='distance'))
 
-        # Clusterize the data
-        threshold = 0.2
-        Z = linkage(nb_members_matrix, 'ward')
-        clusters = list(fcluster(Z, threshold, criterion='distance'))
+            # clusterer = AgglomerativeClustering(n_clusters=len(nb_members_matrix), metric="precomputed", linkage="average")
+            # clusters = list(clusterer.fit_predict(nb_members_matrix))
+            print(clusters)
 
-        # clusterer = AgglomerativeClustering(n_clusters=len(nb_members_matrix), metric="precomputed", linkage="average")
-        # clusters = list(clusterer.fit_predict(nb_members_matrix))
-        print(clusters)
+            labels = list(ixs.keys())
+            sorted_labels = []
+            sorted_matrix = []
+            for i in range(max(clusters)):
+                idx = clusters.index(i+1)
+                sorted_labels.append(labels[idx])
 
-        labels = list(ixs.keys())
-        sorted_labels = []
-        sorted_matrix = []
-        for i in range(max(clusters)):
-            idx = clusters.index(i+1)
-            sorted_labels.append(labels[idx])
+                row = nb_members_matrix[idx]
+                sorted_row = [row[clusters.index(j+1)] for j in range(max(clusters))]
+                sorted_matrix.append(sorted_row)
 
-            row = nb_members_matrix[idx]
-            sorted_row = [row[clusters.index(j+1)] for j in range(max(clusters))]
-            sorted_matrix.append(sorted_row)
-
-        if len(sorted_matrix):
-            title = f'{country_code}:  {len(asns)} {country_code} ASNs peer at IXPs (intl. IXP with less than {threshold} ASes not shown)'
+            title = f'{country_code}:  {len(asns)} {country_code} ASNs peer at IXPs (intl. IXP with less than {threshold_ixp} ASes not shown)'
 
             for data_source, mem in membership_per_dataset.items():
                 title += f'<br>   {len(mem)} membership reported by {data_source}'
@@ -264,6 +268,7 @@ def heatmap_ixps(query, fname_suffix):
 
 query_ix_mem_all = """
 MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+WHERE (members)-[:ORIGINATE]-(:Prefix)
 MATCH (ix)-[mo:MEMBER_OF]-(members)
 OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
 OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
@@ -275,9 +280,10 @@ ORDER BY ix_name, ix_org.name
 
 heatmap_ixps(query_ix_mem_all, 'all')
 
-if False:
+if True:
     query_ix_mem_transit = """
     MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    WHERE (members)-[:ORIGINATE]-(:Prefix)
     MATCH (members)-[ihr_rank:RANK {reference_org:'IHR', weightscheme:'as'}]-(:Ranking)
     WHERE ihr_rank.hege > $hege_min
     MATCH (ix)-[mo:MEMBER_OF]-(members)
@@ -289,13 +295,27 @@ if False:
     ORDER BY ix_name, ix_org.name
     """
 
+#    query_ix_mem_transit = """
+#    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+#    MATCH (members)-[ihr_rank:RANK {reference_org:'IHR', weightscheme:'as'}]-(:Ranking)
+#    WHERE ihr_rank.hege > $hege_min
+#    MATCH (ix)-[mo:MEMBER_OF]-(members)
+#    OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
+#    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+#    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+#    members.asn AS member_asn, ix_country.country_code AS ix_country,
+#    mo.reference_org AS data_source
+#    ORDER BY ix_name, ix_org.name
+#    """
+
     heatmap_ixps(query_ix_mem_transit, 'transit')
 
     query_ix_mem_eyeball = """
     MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    WHERE (members)-[:ORIGINATE]-(:Prefix)
+    MATCH (ix)-[mo:MEMBER_OF]-(members)
     MATCH (members)-[p:POPULATION]-(selected_country)
     WHERE  p.percent > $eyeball_min_perc
-    MATCH (ix)-[mo:MEMBER_OF]-(members)
     OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
     OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
     RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
@@ -304,13 +324,25 @@ if False:
     ORDER BY ix_name, ix_org.name
     """
 
+#    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+#    MATCH (members)-[p:POPULATION]-(selected_country)
+#    WHERE  p.percent > $eyeball_min_perc
+#    MATCH (ix)-[mo:MEMBER_OF]-(members)
+#    OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
+#    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+#    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+#    members.asn AS member_asn, ix_country.country_code AS ix_country,
+#    mo.reference_org AS data_source
+#    ORDER BY ix_name, ix_org.name
+#    """
+
     heatmap_ixps(query_ix_mem_eyeball, 'eyeball')
 
     query_ix_mem_content = """
-    MATCH (a:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
-    MATCH (ix)-[mo:MEMBER_OF]-(a)
-    WITH ix
-    MATCH (ix)-[mo:MEMBER_OF]-(members:AS)-[:CATEGORIZED]-(:Tag {label:'Content'})
+    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(:Country {country_code:$country_code})
+    WHERE (members)-[:ORIGINATE]-(:Prefix)
+    MATCH (members)-[:CATEGORIZED]-(:Tag {label:'Content'})
+    MATCH (ix)-[mo:MEMBER_OF]-(members)
     OPTIONAL MATCH (ix:IXP)-[:COUNTRY]-(ix_country:Country)
     OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
     RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
@@ -321,6 +353,18 @@ if False:
 
     heatmap_ixps(query_ix_mem_content, 'content')
 
+    query_ix_mem_intl = """
+    MATCH (members:AS)-[mo:MEMBER_OF]-(ix:IXP)-[:COUNTRY]-(ix_country:Country {country_code:$country_code})
+    MATCH (members:AS)-[:COUNTRY {reference_org:'NRO'}]-(as_country:Country)
+    WHERE  as_country.country_code <> $country_code AND (members)-[:ORIGINATE]-(:Prefix)
+    OPTIONAL MATCH (ix:IXP)-[:MANAGED_BY {reference_org:'PeeringDB'}]-(ix_org:Organization)
+    RETURN  ix.name + ' - ' + upper(coalesce(ix_country.country_code, 'zz')) AS ix_name,
+    members.asn AS member_asn, ix_country.country_code AS ix_country,
+    mo.reference_org AS data_source
+    ORDER BY ix_name, ix_org.name
+    """
+
+    heatmap_ixps(query_ix_mem_intl, 'intl')
 ##
 
 query_ix_stats = """
