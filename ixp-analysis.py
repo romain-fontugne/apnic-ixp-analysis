@@ -20,13 +20,14 @@
 # into the level of engagement and redundancy in the local peering environment.
 
 # %%
-COUNTRY_CODES = ["RO", "DE", "FR"]
-                 #COUNTRY_CODES = ["AF", "AS", "AU", "BD", "BT", "IO", "BN", "KH", "CN", "CX",
-                                   #"CC", "CK", "TL", "FJ", "PF", "TF", "GU", "HK", "IN", "ID",
-                                   #"JP", "KI", "KP", "KR", "LA", "MO", "MY", "MV", "MH", "FM",
-                                   #"MN", "MM", "NR", "NP", "NC", "NZ", "NU", "NF", " MP", "PK",
-                                   #"PW", "PG", "PH", "PN", "WS", "SG", "SB", "LK", "TW", "TH",
-                                   #"TK", "TO", "TV", "VU", "VN", "WF"]
+
+#COUNTRY_CODES = ["SI", "HR", "BA", "RS", "ME", "RO", "BG", "AL", "MK", "GR", "XK"]
+COUNTRY_CODES = ["AF", "AS", "AU", "BD", "BT", "IO", "BN", "KH", "CN", "CX",
+                    "CC", "CK", "TL", "FJ", "PF", "TF", "GU", "HK", "IN", "ID",
+                    "JP", "KI", "KP", "KR", "LA", "MO", "MY", "MV", "MH", "FM",
+                    "MN", "MM", "NR", "NP", "NC", "NZ", "NU", "NF", " MP", "PK",
+                    "PW", "PG", "PH", "PN", "WS", "SG", "SB", "LK", "TW", "TH",
+                    "TK", "TO", "TV", "VU", "VN", "WF"]
 
 # ASes representing more than EYEBALL_MIN_PERC percent of the population are
 # considered as eyeball networks
@@ -55,7 +56,6 @@ os.makedirs('output', exist_ok=True)
 os.makedirs('output/ixp_distribution', exist_ok=True)
 os.makedirs('output/as_peering_count', exist_ok=True)
 os.makedirs('output/ixp_stats', exist_ok=True)
-os.makedirs('output/violin', exist_ok=True)
 os.makedirs('output/box', exist_ok=True)
 
 # Using IYP local instance
@@ -188,7 +188,8 @@ display(HTML(as_no_ixp(query_pop).to_html()))
 # single IXP versus those that peer at multiple locations.
 
 # %%
-MIN_NB_AS = 0.05
+MIN_INTL_RATE = 0.03
+MIN_NB_AS = 3
 NORMALIZE = False
 
 # Using every dataset that provide IXP membership (may cretate some error for
@@ -231,13 +232,12 @@ def heatmap_ixps(query, fname_suffix):
 
         # remove unpopular international IXPs
         to_remove = []
-        threshold_ixp = max(int(len(asns)*MIN_NB_AS), 5)
+        threshold_ixp = max(int(len(asns)*MIN_INTL_RATE), MIN_NB_AS)
         for ix, members in ixs.items():
             if len(members) < threshold_ixp and not ix.endswith(country_code.lower()):
                 to_remove.append(ix)
             elif ix.endswith(country_code.lower()) and len(members) < 5:
                 to_remove.append(ix)
-
 
         for ix in to_remove:
             ixs.pop(ix)
@@ -253,26 +253,30 @@ def heatmap_ixps(query, fname_suffix):
 
             nb_members_matrix.append(row)
 
-        if len(nb_members_matrix) > 2:
-            # Sort the matrix / Cluster the data
-            threshold_cluster = 0.2
-            Z = linkage(nb_members_matrix, 'ward')
-            clusters = list(fcluster(Z, threshold_cluster, criterion='distance'))
-
-            # clusterer = AgglomerativeClustering(n_clusters=len(nb_members_matrix), metric="precomputed", linkage="average")
-            # clusters = list(clusterer.fit_predict(nb_members_matrix))
-            print(clusters)
-
+        if len(nb_members_matrix) > 0:
             labels = list(ixs.keys())
-            sorted_labels = []
-            sorted_matrix = []
-            for i in range(max(clusters)):
-                idx = clusters.index(i+1)
-                sorted_labels.append(labels[idx])
 
-                row = nb_members_matrix[idx]
-                sorted_row = [row[clusters.index(j+1)] for j in range(max(clusters))]
-                sorted_matrix.append(sorted_row)
+            if len(nb_members_matrix) > 1:
+                # Sort the matrix / Cluster the data
+                threshold_cluster = 0.2
+                Z = linkage(nb_members_matrix, 'ward')
+                clusters = list(fcluster(Z, threshold_cluster, criterion='distance'))
+
+                # clusterer = AgglomerativeClustering(n_clusters=len(nb_members_matrix), metric="precomputed", linkage="average")
+                # clusters = list(clusterer.fit_predict(nb_members_matrix))
+                sorted_labels = []
+                sorted_matrix = []
+                for i in range(max(clusters)):
+                    idx = clusters.index(i+1)
+                    sorted_labels.append(labels[idx])
+
+                    row = nb_members_matrix[idx]
+                    sorted_row = [row[clusters.index(j+1)] for j in range(max(clusters))]
+                    sorted_matrix.append(sorted_row)
+
+            else:
+                sorted_labels = labels
+                sorted_matrix = nb_members_matrix
 
             title = f'{country_code}:  {len(asns)} {country_code} ASNs peer at IXPs (intl. IXP with less than {threshold_ixp} ASes not shown)'
 
@@ -287,7 +291,8 @@ def heatmap_ixps(query, fname_suffix):
                             color_continuous_scale='sunsetdark', title=title, text_auto=True)
             fig.write_html(f'output/ixp_distribution/{country_code}_{fname_suffix}.html')
         else:
-            print(f'WARNING: no data for {country_code}')
+            print(f'WARNING: ({fname_suffix}) no data for {country_code}')
+            print(to_remove)
 
 
 query_ix_mem_all = """
@@ -405,7 +410,8 @@ for country_code in COUNTRY_CODES:
     res, _, keys = db.execute_query(query_ix_stats, country_code=country_code)
     df = pd.DataFrame(res, columns=keys)
 
-    fig = px.scatter(df, x='nb_content', y='nb_eyeball', size='nb_members', hover_name='ix_name')
-    fig.write_html(f'output/ixp_stats/{country_code}.html')
+    if len(df):
+        fig = px.scatter(df, x='nb_content', y='nb_eyeball', size='nb_members', hover_name='ix_name')
+        fig.write_html(f'output/ixp_stats/{country_code}.html')
 
 
