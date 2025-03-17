@@ -20,12 +20,13 @@
 # into the level of engagement and redundancy in the local peering environment.
 
 # %%
-COUNTRY_CODES = ["AF", "AS", "AU", "BD", "BT", "IO", "BN", "KH", "CN", "CX",
-                 "CC", "CK", "TL", "FJ", "PF", "TF", "GU", "HK", "IN", "ID",
-                 "JP", "KI", "KP", "KR", "LA", "MO", "MY", "MV", "MH", "FM",
-                 "MN", "MM", "NR", "NP", "NC", "NZ", "NU", "NF", " MP", "PK",
-                 "PW", "PG", "PH", "PN", "WS", "SG", "SB", "LK", "TW", "TH",
-                 "TK", "TO", "TV", "VU", "VN", "WF"]
+COUNTRY_CODES = ["RO", "DE", "FR"]
+                 #COUNTRY_CODES = ["AF", "AS", "AU", "BD", "BT", "IO", "BN", "KH", "CN", "CX",
+                                   #"CC", "CK", "TL", "FJ", "PF", "TF", "GU", "HK", "IN", "ID",
+                                   #"JP", "KI", "KP", "KR", "LA", "MO", "MY", "MV", "MH", "FM",
+                                   #"MN", "MM", "NR", "NP", "NC", "NZ", "NU", "NF", " MP", "PK",
+                                   #"PW", "PG", "PH", "PN", "WS", "SG", "SB", "LK", "TW", "TH",
+                                   #"TK", "TO", "TV", "VU", "VN", "WF"]
 
 # ASes representing more than EYEBALL_MIN_PERC percent of the population are
 # considered as eyeball networks
