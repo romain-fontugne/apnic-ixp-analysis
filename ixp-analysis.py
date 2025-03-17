@@ -54,6 +54,8 @@ os.makedirs('output', exist_ok=True)
 os.makedirs('output/ixp_distribution', exist_ok=True)
 os.makedirs('output/as_peering_count', exist_ok=True)
 os.makedirs('output/ixp_stats', exist_ok=True)
+os.makedirs('output/violin', exist_ok=True)
+os.makedirs('output/box', exist_ok=True)
 
 # Using IYP local instance
 URI = "neo4j://localhost:7687"
@@ -187,6 +189,27 @@ display(HTML(as_no_ixp(query_pop).to_html()))
 # %%
 MIN_NB_AS = 0.05
 NORMALIZE = False
+
+# Using every dataset that provide IXP membership (may cretate some error for
+# IXPs not uniquely identified by CAIDA ix dataset)
+query_as_membership = """
+MATCH (:Country {country_code:$country_code})-[:COUNTRY {reference_org:'NRO'}]-(member:AS)
+WHERE (member)-[:ORIGINATE]-(:Prefix)
+OPTIONAL MATCH (member)-[:CATEGORIZED {reference_name:'bgptools.as_names'}]-(tag:Tag)
+OPTIONAL MATCH (member)-[:MEMBER_OF]-(ix_dom:IXP)-[:COUNTRY]-(:Country {country_code:$country_code})
+OPTIONAL MATCH (member)-[:MEMBER_OF]-(ix_intl:IXP)-[:COUNTRY]-(other_country:Country)
+WHERE other_country.country_code <> $country_code
+RETURN  member.asn AS asn, coalesce(tag.label, 'Other') AS label, count(DISTINCT lower(ix_dom.name)) AS nb_dom_ix, count(DISTINCT lower(ix_intl.name)) AS nb_intl_ix
+"""
+
+for country_code in COUNTRY_CODES:
+    res, _, keys = db.execute_query(query_as_membership, country_code=country_code)
+    df = pd.DataFrame(res, columns=keys)
+
+    fig = px.box(df, x='label', y='nb_dom_ix')
+    fig.write_html(f'output/box/{country_code}_dom.html')
+    fig = px.box(df, x='label', y='nb_intl_ix')
+    fig.write_html(f'output/box/{country_code}_intl.html')
 
 
 def heatmap_ixps(query, fname_suffix):
@@ -383,3 +406,5 @@ for country_code in COUNTRY_CODES:
 
     fig = px.scatter(df, x='nb_content', y='nb_eyeball', size='nb_members', hover_name='ix_name')
     fig.write_html(f'output/ixp_stats/{country_code}.html')
+
+
